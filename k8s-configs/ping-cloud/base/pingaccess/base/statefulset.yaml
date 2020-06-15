@@ -1,0 +1,309 @@
+# This defines the pingaccess admin deployment.
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pingaccess-admin
+  labels:
+    cluster: pingaccess-cluster
+    role: pingaccess-admin
+spec:
+  selector:
+    matchLabels:
+      role: pingaccess-admin
+  replicas: 1
+  serviceName: pingaccess-admin
+  updateStrategy:
+    type: RollingUpdate
+  podManagementPolicy: OrderedReady
+  template:
+    metadata:
+      name: pingaccess-admin
+      labels:
+        cluster: pingaccess-cluster
+        role: pingaccess-admin
+      annotations:
+        lastUpdateReason: "NA"
+    spec:
+      serviceAccount: ping-serviceaccount
+      initContainers:
+      - name: pingaccess-init
+        # FIXME: switch to same user as app
+        securityContext:
+          runAsNonRoot: false
+          runAsUser: 0
+        image: bitnami/kubectl:1.15.3
+        imagePullPolicy: Always
+        command:
+        - /init.sh
+        volumeMounts:
+        - name: ssh-dir
+          mountPath: /.ssh
+        - name: data-dir
+          mountPath: /data
+        - name: ssh-id-key-secret
+          mountPath: /id_rsa
+          subPath: id_rsa
+        - name: known-hosts-config
+          mountPath: /known_hosts
+          subPath: known_hosts
+        - name: pingaccess-init
+          mountPath: /init.sh
+          subPath: init.sh
+        envFrom:
+        - configMapRef:
+            name: pingaccess-environment-variables
+      containers:
+      - name: pingaccess-admin
+        image: pingidentity/pingaccess:2003-6.0.1
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "1"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+        volumeMounts:
+        # FIXME: fix home directory when containers run as non-root user
+        - name: ssh-dir
+          mountPath: /root/.ssh
+        - name: data-dir
+          mountPath: /usr/local/bin/kubectl
+          subPath: kubectl
+        - name: out-dir
+          mountPath: /opt/out
+        - name: pingaccess-license
+          mountPath: /opt/in/instance/conf/pingaccess.lic
+          subPath: pingaccess.lic
+        - name: data-dir
+          mountPath: /opt/staging/env_vars
+          subPath: env_vars
+        readinessProbe:
+          exec:
+            command:
+              - /opt/staging/hooks/85-readiness.sh
+          initialDelaySeconds: 60
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command: [ liveness.sh ]
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          failureThreshold: 3
+        ports:
+        - containerPort: 9000
+        - containerPort: 9090
+        env:
+        - name: OPERATIONAL_MODE
+          value: CLUSTERED_CONSOLE
+        - name: HTTPS_PORT
+          value: "9090"
+        - name: OLD_PA_ADMIN_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: pingaccess-passwords
+              key: OLD_PA_ADMIN_USER_PASSWORD
+        - name: PA_ADMIN_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: pingaccess-passwords
+              key: PA_ADMIN_USER_PASSWORD
+        envFrom:
+        - configMapRef:
+            name: pingaccess-environment-variables
+        - secretRef:
+            name: devops-secret
+            optional: true
+      volumes:
+      - name: ssh-dir
+        emptyDir: {}
+      - name: data-dir
+        emptyDir: {}
+      - name: pingaccess-init
+        configMap:
+          name: pingcommon-init
+          defaultMode: 0555
+      - name: ssh-id-key-secret
+        secret:
+          secretName: ssh-id-key-secret
+          optional: true
+          defaultMode: 0400
+      - name: known-hosts-config
+        configMap:
+          name: known-hosts-config
+          optional: true
+          defaultMode: 0644
+      - name: out-dir
+        persistentVolumeClaim:
+          claimName: out-dir
+      - name: pingaccess-license
+        secret:
+          secretName: pingaccess-license
+          optional: true
+          defaultMode: 0400
+      - name: pingaccess-passwords
+        secret:
+          secretName: pingaccess-passwords
+          optional: true
+          defaultMode: 0400
+  volumeClaimTemplates:
+  - metadata:
+      name: out-dir
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: pingaccess-gp2
+      resources:
+        requests:
+          storage: 20Gi
+
+---
+
+# This defines the pingaccess engine deployment.
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pingaccess
+  labels:
+    cluster: pingaccess-cluster
+    role: pingaccess-engine
+spec:
+  selector:
+    matchLabels:
+      role: pingaccess-engine
+  serviceName: pingaccess
+  podManagementPolicy: Parallel
+  template:
+    metadata:
+      name: pingaccess-engine
+      labels:
+        cluster: pingaccess-cluster
+        role: pingaccess-engine
+      annotations:
+        lastUpdateReason: "NA"
+    spec:
+      serviceAccount: ping-serviceaccount
+      initContainers:
+      - name: pingaccess-init
+        # FIXME: switch to same user as app
+        securityContext:
+          runAsNonRoot: false
+          runAsUser: 0
+        image: bitnami/kubectl:1.15.3
+        imagePullPolicy: IfNotPresent
+        command:
+        - /init.sh
+        volumeMounts:
+        - name: ssh-dir
+          mountPath: /.ssh
+        - name: data-dir
+          mountPath: /data
+        - name: ssh-id-key-secret
+          mountPath: /id_rsa
+          subPath: id_rsa
+        - name: known-hosts-config
+          mountPath: /known_hosts
+          subPath: known_hosts
+        - name: pingaccess-init
+          mountPath: /init.sh
+          subPath: init.sh
+        envFrom:
+        - configMapRef:
+            name: pingaccess-environment-variables
+      containers:
+      - name: pingaccess
+        image: pingidentity/pingaccess:2003-6.0.1
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "1"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+        volumeMounts:
+        # FIXME: fix home directory when containers run as non-root user
+        - name: ssh-dir
+          mountPath: /root/.ssh
+        - name: data-dir
+          mountPath: /usr/local/bin/kubectl
+          subPath: kubectl
+        - name: pingaccess-license
+          mountPath: /opt/in/instance/conf/pingaccess.lic
+          subPath: pingaccess.lic
+        - name: pingaccess-pre-stop
+          mountPath: /opt/staging/pre-stop.sh
+          subPath: pre-stop.sh
+        - name: data-dir
+          mountPath: /opt/staging/env_vars
+          subPath: env_vars
+        readinessProbe:
+          exec:
+            command: [ liveness.sh ]
+          initialDelaySeconds: 60
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command: [ liveness.sh ]
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /opt/staging/pre-stop.sh
+        ports:
+        - containerPort: 3000
+        - containerPort: 3030
+        env:
+        - name: OPERATIONAL_MODE
+          value: CLUSTERED_ENGINE
+        - name: PA_ADMIN_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: pingaccess-passwords
+              key: PA_ADMIN_USER_PASSWORD
+        envFrom:
+        - configMapRef:
+            name: pingaccess-environment-variables
+        - secretRef:
+            name: devops-secret
+            optional: true
+      volumes:
+      - name: ssh-dir
+        emptyDir: {}
+      - name: data-dir
+        emptyDir: {}
+      - name: pingaccess-init
+        configMap:
+          name: pingcommon-init
+          defaultMode: 0555
+      - name: ssh-id-key-secret
+        secret:
+          secretName: ssh-id-key-secret
+          optional: true
+          defaultMode: 0400
+      - name: known-hosts-config
+        configMap:
+          name: known-hosts-config
+          optional: true
+          defaultMode: 0644
+      - name: pingaccess-license
+        secret:
+          secretName: pingaccess-license
+          optional: true
+          defaultMode: 0400
+      - name: pingaccess-passwords
+        secret:
+          secretName: pingaccess-passwords
+          optional: true
+          defaultMode: 0400
+      - name: pingaccess-pre-stop
+        configMap:
+          name: pingaccess-pre-stop
+          defaultMode: 0555

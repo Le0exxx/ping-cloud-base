@@ -1,0 +1,319 @@
+kind: Kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+
+namespace: ${PING_CLOUD_NAMESPACE}
+
+resources:
+${PING_CLOUD_NAMESPACE_RESOURCE}
+- ${K8S_GIT_URL}/k8s-configs/ping-cloud/${KUSTOMIZE_BASE}?ref=${K8S_GIT_BRANCH}
+
+images:
+- name: pingidentity/pingdirectory
+  newName: ${REGISTRY_NAME}/pingidentity/pingdirectory
+- name: pingidentity/pingfederate
+  newName: ${REGISTRY_NAME}/pingidentity/pingfederate
+- name: pingidentity/pingaccess
+  newName: ${REGISTRY_NAME}/pingidentity/pingaccess
+
+generatorOptions:
+  disableNameSuffixHash: false
+
+configMapGenerator:
+
+# Create the config maps that hold the variable for triggering updates of PD servers
+- name: pingdirectory-last-update-config
+  envs:
+  - pingdirectory/env_vars
+
+# Create the config maps that hold the variable for triggering updates of PF servers
+- name: pingfederate-last-update-config
+  envs:
+  - pingfederate/env_vars
+
+# Create the config maps that hold the variable for triggering updates of PA servers
+- name: pingaccess-last-update-config
+  envs:
+  - pingaccess/env_vars
+
+# Pingdirectory
+- name: pingdirectory-environment-variables
+  behavior: merge
+  envs:
+  - env_vars
+  - pingdirectory/env_vars
+
+# Pingfederate
+- name: pingfederate-environment-variables
+  behavior: merge
+  envs:
+  - env_vars
+  - pingfederate/env_vars
+
+# PingAccess
+- name: pingaccess-environment-variables
+  behavior: merge
+  envs:
+  - env_vars
+  - pingaccess/env_vars
+
+patchesStrategicMerge:
+
+### Ping app DevOps secret ###
+
+# This should be deleted after populating the secrets for the product licenses
+- |-
+  apiVersion: v1
+  kind: Secret
+  type: Opaque
+  metadata:
+    name: devops-secret
+  data:
+    PING_IDENTITY_DEVOPS_USER: ${PING_IDENTITY_DEVOPS_USER_BASE64}
+    PING_IDENTITY_DEVOPS_KEY: ${PING_IDENTITY_DEVOPS_KEY_BASE64}
+
+### Licenses ###
+
+# Add PingDirectory.lic (case-sensitive) to the data section with the base64-encoded value of the license file
+- |-
+  apiVersion: v1
+  kind: Secret
+  metadata:
+    name: pingdirectory-license
+  type: Opaque
+
+# Add pingfederate.lic (case-sensitive) to the data section with the base64-encoded value of the license file
+- |-
+  apiVersion: v1
+  kind: Secret
+  metadata:
+    name: pingfederate-license
+  type: Opaque
+
+# Add pingaccess.lic (case-sensitive) to the data section with the base64-encoded value of the license file
+- |-
+  apiVersion: v1
+  kind: Secret
+  metadata:
+    name: pingaccess-license
+  type: Opaque
+
+### Product passwords ###
+
+# Supported keys:
+# Exported as environment variables: PF_ADMIN_USER_PASSWORD, PF_LDAP_PASSWORD
+- |-
+  apiVersion: v1
+  kind: Secret
+  type: Opaque
+  metadata:
+    name: pingcommon-passwords
+
+# Supported keys:
+# Mounted as files: root-user-password, admin-user-password, encryption-password
+# Exported as environment variables: P14C_ENVIRONMENT_ID, P14C_CLIENT_ID, P14C_CLIENT_SECRET
+- |-
+  apiVersion: v1
+  kind: Secret
+  type: Opaque
+  metadata:
+    name: pingdirectory-passwords
+
+# Supported keys:
+# Exported as environment variables: PA_ADMIN_USER_PASSWORD, OLD_PA_ADMIN_USER_PASSWORD
+- |-
+  apiVersion: v1
+  kind: Secret
+  type: Opaque
+  metadata:
+    name: pingaccess-passwords
+
+### Ping app SSH private key ###
+
+- |-
+  apiVersion: v1
+  kind: Secret
+  type: Opaque
+  metadata:
+    name: ssh-id-key-secret
+  data:
+    id_rsa: |
+      ${SSH_ID_KEY_BASE64}
+
+### Ping app known_hosts file ###
+
+- |-
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: known-hosts-config
+  data:
+    known_hosts: |
+      ${KNOWN_HOSTS_CLUSTER_STATE_REPO}
+
+### Ping cloud stack service account ###
+- |-
+  apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: ping-serviceaccount
+    annotations:
+      purpose: service-account-for-ping-cloud-stack
+      ${S3_IRSA_ARN_KEY_AND_VALUE}
+
+${DELETE_PING_CLOUD_NAMESPACE_PATCH_MERGE}
+
+patchesJson6902:
+
+### Ping Directory Last Update Config Map ###
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: pingdirectory
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/envFrom/-
+      value:
+        configMapRef:
+          name: pingdirectory-last-update-config
+
+### Ping Federate Admin Last Update Config Map ###
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: pingfederate-admin
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/envFrom/-
+      value:
+        configMapRef:
+          name: pingfederate-last-update-config
+
+### Ping Federate Engine Last Update Config Map ###
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: pingfederate
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/envFrom/-
+      value:
+        configMapRef:
+          name: pingfederate-last-update-config
+
+### Ping Access Admin Last Update Config Map ###
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: pingaccess-admin
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/envFrom/-
+      value:
+        configMapRef:
+          name: pingaccess-last-update-config
+
+### Ping Access Engine Last Update Config Map ###
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: pingaccess
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/envFrom/-
+      value:
+        configMapRef:
+          name: pingaccess-last-update-config
+
+### Ingress patches ###
+
+# pingaccess runtime
+- target:
+    group: extensions
+    version: v1beta1
+    kind: Ingress
+    name: pingaccess-ingress
+  patch: |
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: pingaccess${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+    - op: replace
+      path: /spec/rules/0/host
+      value: pingaccess${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+
+# pingaccess admin
+- target:
+    group: extensions
+    version: v1beta1
+    kind: Ingress
+    name: pingaccess-admin-ingress
+  patch: |
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: pingaccess-admin${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+    - op: replace
+      path: /spec/rules/0/host
+      value: pingaccess-admin${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+
+# pingaccess agent
+- target:
+    group: extensions
+    version: v1beta1
+    kind: Ingress
+    name: pingaccess-agent-ingress
+  patch: |
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: pingaccess-agent${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+    - op: replace
+      path: /spec/rules/0/host
+      value: pingaccess-agent${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+
+# pingfederate runtime
+- target:
+    group: extensions
+    version: v1beta1
+    kind: Ingress
+    name: pingfederate-ingress
+  patch: |
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: pingfederate${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+    - op: replace
+      path: /spec/rules/0/host
+      value: pingfederate${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+
+# pingfederate admin
+- target:
+    group: extensions
+    version: v1beta1
+    kind: Ingress
+    name: pingfederate-admin-ingress
+  patch: |
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: pingfederate-admin${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+    - op: replace
+      path: /spec/rules/0/host
+      value: pingfederate-admin${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+
+# pingdirectory admin
+- target:
+    version: v1
+    kind: Service
+    name: pingdirectory-admin
+  patch: |-
+    - op: replace
+      path: /metadata/annotations
+      value:
+        service.beta.kubernetes.io/aws-load-balancer-type: nlb
+        service.beta.kubernetes.io/aws-load-balancer-internal: 0.0.0.0/0
+        external-dns.alpha.kubernetes.io/hostname: pingdirectory-admin${DNS_RECORD_SUFFIX}.${DNS_DOMAIN_PREFIX}${TENANT_DOMAIN}
+
+${PING_DIRECTORY_LDAP_ENDPOINT_PATCH}
+
+${PING_DATA_CONSOLE_INGRESS_PATCH}
