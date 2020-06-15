@@ -1,0 +1,505 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: pingaccess-gp2
+mountOptions:
+- discard
+parameters:
+  fsType: ext4
+  type: gp2
+provisioner: kubernetes.io/aws-ebs
+---
+apiVersion: v1
+data:
+  ACCEPT_EULA: "YES"
+  API_RETRY_LIMIT: "10"
+  API_TIMEOUT_WAIT: "5"
+  BACKUP_FILE_NAME: ""
+  CONFIG_QUERY_KP_VALID_DAYS: "365"
+  K8S_SERVICE_NAME_PINGACCESS_ADMIN: pingaccess-admin
+  K8S_STATEFUL_SET_NAME_PINGACCESS: pingaccess-admin
+  ORCHESTRATION_TYPE: kubernetes
+  PA_ADMIN_USER_USERNAME: Administrator
+  PA_GCOPTION: -XX:-UseParallelGC -XX:MinHeapFreeRatio=20 -XX:MaxHeapFreeRatio=40
+    -XX:GCTimeRatio=4 -XX:AdaptiveSizePolicyWeight=90
+  PA_MAX_HEAP: 256m
+  PA_MAX_YGEN: 128m
+  PA_MIN_HEAP: 128m
+  PA_MIN_YGEN: 128m
+  PING_IDENTITY_ACCEPT_EULA: "YES"
+  S3_BACKUP_FILTER_DAY_COUNT: "3"
+  SERVER_PROFILE_BRANCH: master
+  SERVER_PROFILE_PATH: profiles/aws/pingaccess
+  SERVER_PROFILE_URL: https://github.com/pingidentity/ping-cloud-base.git
+  STOP_SERVER_ON_FAILURE: "true"
+kind: ConfigMap
+metadata:
+  name: pingaccess-environment-variables
+---
+apiVersion: v1
+data:
+  pre-stop.sh: |-
+    #!/bin/sh -x
+
+    echo "Starting pre-stop hook"
+
+    SHORT_HOST_NAME=$(hostname)
+    ORDINAL=$(echo ${SHORT_HOST_NAME##*-})
+    echo "Pod ordinal: ${ORDINAL}"
+
+    NUM_REPLICAS=$(kubectl get statefulset "${K8S_STATEFUL_SET_NAME_PINGACCESS}" -o jsonpath='{.spec.replicas}')
+    echo "Number of replicas: ${NUM_REPLICAS}"
+
+    if test ${ORDINAL} -lt ${NUM_REPLICAS}; then
+      echo "Not removing server since it is still in the topology"
+      exit 0
+    fi
+
+    set +x
+    # Retrieve Engine ID
+    ENGINE_ID=$( curl -k --retry ${API_RETRY_LIMIT} \
+                         --max-time ${API_TIMEOUT_WAIT} \
+                         --retry-delay 1 \
+                         --retry-connrefused \
+                         -u ${PA_ADMIN_USER_USERNAME}:${PA_ADMIN_USER_PASSWORD} \
+                         -H "X-Xsrf-Header: PingAccess " \
+                         -X GET https://${K8S_SERVICE_NAME_PINGACCESS_ADMIN}:9000/pa-admin-api/v3/engines | \
+                         jq --arg SHORT_HOST_NAME "${SHORT_HOST_NAME}" \
+                         '.items[] | select(.name==$SHORT_HOST_NAME) | .id' )
+
+    # Delete Engine
+    curl -k --retry ${API_RETRY_LIMIT} \
+                         --max-time ${API_TIMEOUT_WAIT} \
+                         --retry-delay 1 \
+                         --retry-connrefused \
+                         -u ${PA_ADMIN_USER_USERNAME}:${PA_ADMIN_USER_PASSWORD} \
+                         -H "X-Xsrf-Header: PingAccess " \
+                         -X DELETE https://${K8S_SERVICE_NAME_PINGACCESS_ADMIN}:9000/pa-admin-api/v3/engines/${ENGINE_ID} \
+                         > /dev/null
+    set -x
+kind: ConfigMap
+metadata:
+  name: pingaccess-pre-stop
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+    sealedsecrets.bitnami.com/managed: "true"
+  name: pingaccess-license
+type: Opaque
+---
+apiVersion: v1
+data:
+  OLD_PA_ADMIN_USER_PASSWORD: MkFjY2Vzcw==
+  PA_ADMIN_USER_PASSWORD: MkZlZGVyYXRlTTByZQ==
+kind: Secret
+metadata:
+  annotations:
+    sealedsecrets.bitnami.com/managed: "true"
+  name: pingaccess-passwords
+type: Opaque
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pingaccess
+spec:
+  ports:
+  - name: pingaccess-engine
+    port: 443
+    targetPort: 3000
+  - name: pingaccess-agent
+    port: 3030
+  selector:
+    role: pingaccess-engine
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pingaccess-admin
+spec:
+  ports:
+  - name: pingaccess-admin
+    port: 9000
+  - name: pingaccess-cluster
+    port: 9090
+  selector:
+    role: pingaccess-admin
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    cluster: pingaccess-cluster
+    role: pingaccess-engine
+  name: pingaccess
+spec:
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      role: pingaccess-engine
+  serviceName: pingaccess
+  template:
+    metadata:
+      annotations:
+        lastUpdateReason: NA
+      labels:
+        cluster: pingaccess-cluster
+        role: pingaccess-engine
+      name: pingaccess-engine
+    spec:
+      containers:
+      - env:
+        - name: OPERATIONAL_MODE
+          value: CLUSTERED_ENGINE
+        - name: PA_ADMIN_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: PA_ADMIN_USER_PASSWORD
+              name: pingaccess-passwords
+        envFrom:
+        - configMapRef:
+            name: pingaccess-environment-variables
+        - secretRef:
+            name: devops-secret
+            optional: true
+        image: pingidentity/pingaccess:2003-6.0.1
+        imagePullPolicy: Always
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /opt/staging/pre-stop.sh
+        livenessProbe:
+          exec:
+            command:
+            - liveness.sh
+          failureThreshold: 3
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        name: pingaccess
+        ports:
+        - containerPort: 3000
+        - containerPort: 3030
+        readinessProbe:
+          exec:
+            command:
+            - liveness.sh
+          failureThreshold: 3
+          initialDelaySeconds: 60
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+        - mountPath: /root/.ssh
+          name: ssh-dir
+        - mountPath: /usr/local/bin/kubectl
+          name: data-dir
+          subPath: kubectl
+        - mountPath: /opt/in/instance/conf/pingaccess.lic
+          name: pingaccess-license
+          subPath: pingaccess.lic
+        - mountPath: /opt/staging/pre-stop.sh
+          name: pingaccess-pre-stop
+          subPath: pre-stop.sh
+        - mountPath: /opt/staging/env_vars
+          name: data-dir
+          subPath: env_vars
+      initContainers:
+      - command:
+        - /init.sh
+        envFrom:
+        - configMapRef:
+            name: pingaccess-environment-variables
+        image: bitnami/kubectl:1.15.3
+        imagePullPolicy: IfNotPresent
+        name: pingaccess-init
+        securityContext:
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /.ssh
+          name: ssh-dir
+        - mountPath: /data
+          name: data-dir
+        - mountPath: /id_rsa
+          name: ssh-id-key-secret
+          subPath: id_rsa
+        - mountPath: /known_hosts
+          name: known-hosts-config
+          subPath: known_hosts
+        - mountPath: /init.sh
+          name: pingaccess-init
+          subPath: init.sh
+      serviceAccount: ping-serviceaccount
+      volumes:
+      - emptyDir: {}
+        name: ssh-dir
+      - emptyDir: {}
+        name: data-dir
+      - configMap:
+          defaultMode: 365
+          name: pingcommon-init
+        name: pingaccess-init
+      - name: ssh-id-key-secret
+        secret:
+          defaultMode: 256
+          optional: true
+          secretName: ssh-id-key-secret
+      - configMap:
+          defaultMode: 420
+          name: known-hosts-config
+          optional: true
+        name: known-hosts-config
+      - name: pingaccess-license
+        secret:
+          defaultMode: 256
+          optional: true
+          secretName: pingaccess-license
+      - name: pingaccess-passwords
+        secret:
+          defaultMode: 256
+          optional: true
+          secretName: pingaccess-passwords
+      - configMap:
+          defaultMode: 365
+          name: pingaccess-pre-stop
+        name: pingaccess-pre-stop
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    cluster: pingaccess-cluster
+    role: pingaccess-admin
+  name: pingaccess-admin
+spec:
+  podManagementPolicy: OrderedReady
+  replicas: 1
+  selector:
+    matchLabels:
+      role: pingaccess-admin
+  serviceName: pingaccess-admin
+  template:
+    metadata:
+      annotations:
+        lastUpdateReason: NA
+      labels:
+        cluster: pingaccess-cluster
+        role: pingaccess-admin
+      name: pingaccess-admin
+    spec:
+      containers:
+      - env:
+        - name: OPERATIONAL_MODE
+          value: CLUSTERED_CONSOLE
+        - name: HTTPS_PORT
+          value: "9090"
+        - name: OLD_PA_ADMIN_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: OLD_PA_ADMIN_USER_PASSWORD
+              name: pingaccess-passwords
+        - name: PA_ADMIN_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: PA_ADMIN_USER_PASSWORD
+              name: pingaccess-passwords
+        envFrom:
+        - configMapRef:
+            name: pingaccess-environment-variables
+        - secretRef:
+            name: devops-secret
+            optional: true
+        image: pingidentity/pingaccess:2003-6.0.1
+        imagePullPolicy: Always
+        livenessProbe:
+          exec:
+            command:
+            - liveness.sh
+          failureThreshold: 3
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        name: pingaccess-admin
+        ports:
+        - containerPort: 9000
+        - containerPort: 9090
+        readinessProbe:
+          exec:
+            command:
+            - /opt/staging/hooks/85-readiness.sh
+          failureThreshold: 3
+          initialDelaySeconds: 60
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+        - mountPath: /root/.ssh
+          name: ssh-dir
+        - mountPath: /usr/local/bin/kubectl
+          name: data-dir
+          subPath: kubectl
+        - mountPath: /opt/out
+          name: out-dir
+        - mountPath: /opt/in/instance/conf/pingaccess.lic
+          name: pingaccess-license
+          subPath: pingaccess.lic
+        - mountPath: /opt/staging/env_vars
+          name: data-dir
+          subPath: env_vars
+      initContainers:
+      - command:
+        - /init.sh
+        envFrom:
+        - configMapRef:
+            name: pingaccess-environment-variables
+        image: bitnami/kubectl:1.15.3
+        imagePullPolicy: Always
+        name: pingaccess-init
+        securityContext:
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /.ssh
+          name: ssh-dir
+        - mountPath: /data
+          name: data-dir
+        - mountPath: /id_rsa
+          name: ssh-id-key-secret
+          subPath: id_rsa
+        - mountPath: /known_hosts
+          name: known-hosts-config
+          subPath: known_hosts
+        - mountPath: /init.sh
+          name: pingaccess-init
+          subPath: init.sh
+      serviceAccount: ping-serviceaccount
+      volumes:
+      - emptyDir: {}
+        name: ssh-dir
+      - emptyDir: {}
+        name: data-dir
+      - configMap:
+          defaultMode: 365
+          name: pingcommon-init
+        name: pingaccess-init
+      - name: ssh-id-key-secret
+        secret:
+          defaultMode: 256
+          optional: true
+          secretName: ssh-id-key-secret
+      - configMap:
+          defaultMode: 420
+          name: known-hosts-config
+          optional: true
+        name: known-hosts-config
+      - name: out-dir
+        persistentVolumeClaim:
+          claimName: out-dir
+      - name: pingaccess-license
+        secret:
+          defaultMode: 256
+          optional: true
+          secretName: pingaccess-license
+      - name: pingaccess-passwords
+        secret:
+          defaultMode: 256
+          optional: true
+          secretName: pingaccess-passwords
+  updateStrategy:
+    type: RollingUpdate
+  volumeClaimTemplates:
+  - metadata:
+      name: out-dir
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 20Gi
+      storageClassName: pingaccess-gp2
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pingaccess
+spec:
+  maxReplicas: 8
+  minReplicas: 2
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: pingaccess
+  targetCPUUtilizationPercentage: 70
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: nginx-private
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+  name: pingaccess-admin-ingress
+spec:
+  rules:
+  - host: pingaccess-admin-dev.ping-demo.com
+    http:
+      paths:
+      - backend:
+          serviceName: pingaccess-admin
+          servicePort: 9000
+        path: /
+  tls:
+  - hosts:
+    - pingaccess-admin-dev.ping-demo.com
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: nginx-public
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+  name: pingaccess-agent-ingress
+spec:
+  rules:
+  - host: pingaccess-agent-dev.ping-demo.com
+    http:
+      paths:
+      - backend:
+          serviceName: pingaccess
+          servicePort: 3030
+        path: /
+  tls:
+  - hosts:
+    - pingaccess-agent-dev.ping-demo.com
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: nginx-public
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+  name: pingaccess-ingress
+spec:
+  rules:
+  - host: pingaccess-dev.ping-demo.com
+    http:
+      paths:
+      - backend:
+          serviceName: pingaccess
+          servicePort: 443
+        path: /
+  tls:
+  - hosts:
+    - pingaccess-dev.ping-demo.com
